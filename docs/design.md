@@ -1,7 +1,11 @@
 # Meltybrain Simulator: Visualization and Manual Control
 
-- **Date:** 2026-10-29
-- **Status:** Approved, pending implementation plan
+- **Status:** Implemented. Keep in step with the code.
+
+This records *why* the simulator is built the way it is: where the plant
+parameters come from, why saturation scales rather than clips, why the timestep
+is what it is, and which approaches were rejected. See the README for how to run
+and drive it.
 
 ## Goal
 
@@ -73,7 +77,7 @@ mode switching.
 
 ### Drive law
 
-Given a commanded arena-frame direction `psi_d` and throttle `a` in `[0, 1]`:
+Given a commanded direction `psi_d` and throttle `a` in `[0, 1]`:
 
 ```
 f_b = a * f_wheel_max * sign(cos(theta - psi_d))
@@ -160,35 +164,61 @@ the intra-frame motion trail.
 
 ### Numba placement
 
-Jit only where it pays. `state_space.state_dot`, `control.wheel_forces` and
-`control.closed_loop` are `njit(cache=True)` and run roughly 670 times per
-frame. `rksolver.rk4_step` and `simulate` are `njit` without caching, since
-caching is not supported alongside first-class function arguments.
+Jit only where it pays. `state_space.state_dot` is `njit(cache=True)` and runs
+roughly 670 times per frame.
+
+`control.wheel_forces`, `control.closed_loop`, `rksolver.rk4_step` and
+`rksolver.simulate` are `njit` **without** caching. Do not add `cache=True` to
+them:
+
+- The `control` functions freeze constants imported from `state_space`, and
+  numba keys its cache on the defining file alone. A cached build survives edits
+  to `state_space.py` and silently runs with stale parameters. This was observed
+  in practice: with `f_wheel_max` changed to 10.0, `wheel_forces` kept returning
+  values derived from the old 14.7.
+- The `rksolver` functions take first-class function arguments, which caching
+  does not support.
+
+`state_dot` is safe to cache because the constants it freezes live in its own
+file, so editing them invalidates the cache correctly.
 
 `geomutils` is deliberately **not** jitted: it is called a handful of times per
 frame from Python properties, where dispatch overhead exceeds the work. Cross
-module jit-to-jit calls were verified to compile and cache cleanly.
+module jit-to-jit calls were verified to compile cleanly.
 
 ## Input
 
 | Key | Action |
 | --- | --- |
-| Arrow keys | Arena-frame direction `psi_d`; diagonals combine; throttle = 1 while held |
+| Up / Down (hold) | Drive forward / backward along the front |
+| Left / Right (hold) | Precess the front at `STEER_RATE`, default 180 deg/s |
 | Space (hold) | Spin-up torque |
 | Left Shift (hold) | Reverse torque / brake |
 | `C` | Toggle camera follow |
 | `P` | Pause / resume |
 | `N` | Advance one physics substep (`1e-4` s) |
 | `M` | Advance one frame (167 substeps) |
-| `R` | Reset |
+| `R` | Reset, including the front |
 | `Esc` | Quit |
 
-Arrow keys are read as held state via `pygame.key.get_pressed()` and combined
-into a direction vector, which is normalized to yield `psi_d`. They are *not*
-turn commands; the bot's own rotation is invisible to the driver, matching how
-a real melty is flown.
+Controls are **body-relative**, against a steerable reference heading `psi_ref`
+that starts along +X:
 
-Key auto-repeat is enabled so `N` and `M` can be held to scrub.
+```
+psi_d = psi_ref        driving forward
+psi_d = psi_ref + pi   driving backward
+```
+
+Left and right rotate `psi_ref` rather than strafing. Strafing was rejected
+because it leaves `psi_ref` fixed forever, which reduces the LEDs to decoration
+and locks the bot to four cardinal directions.
+
+`psi_ref` is a driver-side reference only. It never enters the plant, and is
+unrelated to the chassis angle `theta` except that the LEDs fire when `theta`
+passes it.
+
+Keys are read as held state via `pygame.key.get_pressed()`. Auto-repeat is
+enabled so `N` and `M` can be held to scrub.
 
 ## Rendering
 
@@ -202,12 +232,19 @@ marker is pure aliasing.
 
 - **Chassis:** filled circle.
 - **Blur ring:** replaces discrete wheel markers above about 5 rev/s.
-- **Beacon:** a dot drawn at the peak-thrust phase, `theta = psi_d`. This mimics
-  a real melty's translation LED and appears stationary when phase-locked. It
-  replaces the heading line.
+- **LEDs:** a green and a red emitter bolted to the chassis at body angles 0 and
+  pi, drawn on the rim and riding round with the heading stripe. They light over
+  a `LED_ARC` half-width arc as the chassis sweeps past `psi_ref`, so every
+  flash necessarily lands at the reference: green forward, red aft. Unlit, they
+  render as dim outlines at the true chassis angle.
 - **Trail:** deque of past positions, faded.
-- **Command arrow:** `psi_d` drawn from the bot center.
+- **Command arrow:** `psi_d` drawn from the bot center while driving.
 - **Grid:** infinite; no arena bounds or collision in this version.
+
+Flash detection scans every substep of the frame's trajectory, not the frame
+endpoint. At 3000 RPM the chassis turns about a revolution per frame, so a
+single sample would catch the flash at random. Measured worst-case flash offset
+from `psi_ref` was 13.97 degrees against a 14 degree arc.
 
 ### Camera
 

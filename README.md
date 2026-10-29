@@ -6,6 +6,9 @@ view and keyboard control.
 
 Default plant is a 3 kg, 300 mm disk operating at 2000–4000 RPM.
 
+Design rationale, parameter derivations and rejected alternatives are in
+[docs/design.md](docs/design.md).
+
 ## Running
 
 Run from the **repository root**, as a module:
