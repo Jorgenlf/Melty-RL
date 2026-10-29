@@ -1,0 +1,11 @@
+[project]
+name = "melty-rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numba>=0.68.1",
+    "numpy>=2.5.4",
+    "pygame-ce>=2.5.8",
+]
