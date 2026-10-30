@@ -76,13 +76,13 @@ class View:
         """Records where on the rim the LEDs fired this frame, if at all."""
         self.flash_angle = _flash_angle(thetas, psi_ref)
 
-    def draw(self, bot, cmd, psi_ref, wheels, paused, substeps):
+    def draw(self, bot, cmd, psi_ref, duties, paused, substeps, translating):
         camera = self._camera(bot)
         self.surface.fill(BACKGROUND)
         self._draw_grid(camera)
         self._draw_trail(camera)
-        self._draw_bot(bot, cmd, psi_ref, camera)
-        self._draw_hud(bot, cmd, psi_ref, wheels, paused, substeps)
+        self._draw_bot(bot, cmd, camera, translating)
+        self._draw_hud(bot, cmd, psi_ref, duties, paused, substeps, translating)
         pygame.display.flip()
 
     def _draw_grid(self, camera):
@@ -108,7 +108,7 @@ class View:
         points = [self.to_screen(p, camera) for p in self.trail]
         pygame.draw.aalines(self.surface, TRAIL, False, points)
 
-    def _draw_bot(self, bot, cmd, psi_ref, camera):
+    def _draw_bot(self, bot, cmd, camera, translating):
         pos = self.to_screen(bot.position, camera)
         radius = float(ss.R_body*PIXELS_PER_M)
         rev_s = abs(bot.spin_rate)
@@ -134,9 +134,10 @@ class View:
         self._draw_led(pos, radius, led_angle, LED_FRONT, lit)
         self._draw_led(pos, radius, led_angle + np.pi, LED_REAR, lit)
 
-        if cmd[1] > 0.0:
-            psi_d = cmd[0]
-            direction = np.array([np.cos(psi_d), -np.sin(psi_d)])
+        # Only drawn when the drive law will really translate, so it cannot
+        # promise motion that the spin or low-RPM guards are suppressing.
+        if translating:
+            direction = np.array([np.cos(cmd[0]), -np.sin(cmd[0])])
             self._draw_arrow(pos, direction, radius + 70.0)
 
     def _draw_led(self, pos, radius, angle, colour, lit):
@@ -169,17 +170,22 @@ class View:
             tip - 7.0*perp,
         ])
 
-    def _draw_hud(self, bot, cmd, psi_ref, wheels, paused, substeps):
+    def _draw_hud(self, bot, cmd, psi_ref, duties, paused, substeps, translating):
         rpm = bot.spin_rate*60.0
         leds = "FIRE" if self.flash_angle is not None else "----"
+        w_l, w_r = bot.wheel_speeds
+        gate_l = "ON  " if duties[2] > 0.0 else "COAST"
+        gate_r = "ON  " if duties[3] > 0.0 else "COAST"
         lines = [
             f"{rpm:8.0f} RPM   {bot.spin_rate:6.2f} rev/s",
             f"{bot.speed:8.2f} m/s   heading {np.degrees(bot.heading):7.1f} deg",
             f"front    {np.degrees(geom.ssa(psi_ref)):7.1f} deg   led {leds}",
-            f"psi_d    {np.degrees(cmd[0]):7.1f} deg   throttle {cmd[1]:.2f}",
-            f"tau_cmd  {cmd[2]:7.3f} N m",
-            f"wheels   {wheels[0]:7.2f} {wheels[1]:7.2f} N",
-            f"sat s    {wheels[2]:7.3f}",
+            f"psi_d    {np.degrees(cmd[0]):7.1f} deg",
+            f"portion  {cmd[1]:7.2f}   spin {cmd[2]:+.0f}",
+            f"translate {'YES' if translating else ' NO':>6}",
+            f"duty     {duties[0]*duties[2]:7.2f} {duties[1]*duties[3]:7.2f}",
+            f"gate     {gate_l} {gate_r}",
+            f"wheel {w_l*30.0/np.pi:8.0f} {w_r*30.0/np.pi:8.0f} RPM",
             f"substeps {substeps:7d}",
         ]
         if paused:
@@ -191,15 +197,17 @@ class View:
                 f"vx  {bot.velocity[0]: .6f}",
                 f"vy  {bot.velocity[1]: .6f}",
                 f"w   {bot.omega: .6f}",
+                f"wL  {w_l: .6f}",
+                f"wR  {w_r: .6f}",
             ]
 
         for i, line in enumerate(lines):
-            colour = WARN if (line.startswith("sat") and wheels[2] < 0.999) else TEXT
+            colour = WARN if (line.startswith("translate") and not translating) else TEXT
             self.surface.blit(self.font.render(line, True, colour), (16, 14 + 20*i))
 
         footer = ("PAUSED  N substep  M frame  P resume"
                   if paused else
-                  "up/down drive   left/right steer front   space spin   shift brake   P pause   C camera   R reset")
+                  "up/down drive   left/right steer front   space spin   shift brake   [ ] portion   P pause   C camera   R reset")
         mode = f"camera: {'follow' if self.follow else 'fixed'}"
         h = self.surface.get_height()
         self.surface.blit(self.font_small.render(footer, True, TEXT_DIM), (16, h - 44))

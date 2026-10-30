@@ -1,8 +1,9 @@
 import numpy as np
 
-import src.state_space as ss
 import src.geomutils as geom
-from src.rksolver import rk4_step, simulate
+from src.rksolver import simulate
+
+N_STATES = 8
 
 
 class Bot:
@@ -10,28 +11,16 @@ class Bot:
     Planar meltybrain dynamics: a two wheeled chassis that translates while it
     spins about its own vertical axis.
 
-    State x = [X, Y, theta, vx, vy, omega] in the arena frame
-    (+X right, +Y up, theta counterclockwise from +X, kept unwrapped).
-    Input u = [F_left, F_right], the tractive force of each wheel along the
-    body x-axis.
+    State x = [X, Y, theta, vx, vy, omega, w_L, w_R] in the arena frame
+    (+X right, +Y up, theta counterclockwise from +X, kept unwrapped). The
+    trailing pair are wheel speeds in rad/s, carried here because contact force
+    depends on slip against the body motion.
     """
 
     def __init__(self, step_size, init_state=None):
         self.step_size = float(step_size)
-        self.state = (np.zeros(6) if init_state is None
+        self.state = (np.zeros(N_STATES) if init_state is None
                       else np.asarray(init_state, dtype=np.float64).copy())
-        self.input = np.zeros(2)
-
-    def step(self, wheel_forces):
-        self.input = np.clip(np.asarray(wheel_forces, dtype=np.float64),
-                             -ss.f_wheel_max, ss.f_wheel_max)
-        self.state = rk4_step(ss.state_dot, self.state, self.input, self.step_size)
-
-    def state_dot(self, state, input_):
-        """
-        The right hand side of the 6 ODEs governing the meltybrain dynamics.
-        """
-        return ss.state_dot(state, input_)
 
     def run(self, f, u, n_substeps):
         """
@@ -89,6 +78,13 @@ class Bot:
         Returns the spin rate of the bot in revolutions per second.
         """
         return self.state[5]/(2*np.pi)
+
+    @property
+    def wheel_speeds(self):
+        """
+        Returns the left and right wheel speeds in rad/s.
+        """
+        return self.state[6:8]
 
     @property
     def speed(self):

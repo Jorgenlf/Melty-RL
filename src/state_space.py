@@ -10,14 +10,13 @@ R_body = np.float64(0.15)       # m, disk radius
 I = np.float64(0.5*m*R_body**2) # kg m^2, uniform disk about the spin axis
 r_w = np.float64(0.12)          # m, lateral offset of each wheel from the spin axis
 
-b_v = np.float64(2.4)           # N s/m, translational viscous drag
-b_omega = np.float64(8.42e-3)   # N m s/rad, rotational viscous drag
+# Residual drag only. The motors are modelled explicitly in motor.py, so
+# back-EMF now sets terminal spin; these cover aero, bearings and skid scrub.
+b_v = np.float64(0.5)           # N s/m, translational viscous drag
+b_omega = np.float64(3.4e-3)    # N m s/rad, rotational; lands terminal spin at 4000 RPM
 
 # Traction limit: mu ~ 1.0 against the per-wheel share of the 29.4 N weight.
 f_wheel_max = np.float64(14.7)  # N, peak tractive force a single wheel can deliver
-
-# Full differential torque, 3.53 N m, which asymptotes to 4000 RPM against b_omega.
-tau_max = np.float64(2.0*r_w*f_wheel_max)
 
 # Maps wheel forces [F_left, F_right] to the body wrench [f_b, tau]. Both wheels
 # push along the body x-axis; the left wheel sits at +r_w and the right wheel at
@@ -29,21 +28,6 @@ B_mat = np.array([[1.0, 1.0],
 # Diagonals of the inverse mass matrix and of the viscous drag, on [vx, vy, omega].
 M_inv_diag = np.array([1.0/m, 1.0/m, 1.0/I])
 D_diag = np.array([b_v, b_v, b_omega])
-
-
-def M_inv():
-    """Inverse of the generalized mass matrix acting on [vx, vy, omega]."""
-    return np.diag(M_inv_diag)
-
-
-def B():
-    """Maps wheel forces [F_left, F_right] to the body wrench [f_b, tau]."""
-    return B_mat
-
-
-def D(nu):
-    """Viscous drag acting on nu = [vx, vy, omega]."""
-    return D_diag*np.asarray(nu)
 
 
 @nb.njit(cache=True)

@@ -31,6 +31,7 @@ First launch pauses for a second or so while numba compiles the integrator.
 | Left / Right (hold) | Steer: rotate the front counterclockwise / clockwise |
 | Space (hold) | Spin up |
 | Shift (hold) | Brake / reverse spin |
+| `[` / `]` (hold) | Narrow / widen the driving portion |
 | `P` | Pause / resume |
 | `N` | While paused: advance one physics substep (0.1 ms) |
 | `M` | While paused: advance one frame (167 substeps, roughly one revolution) |
@@ -84,12 +85,18 @@ cannot translate sideways, so only forward and backward do anything. Hold
 - **Blur ring** — replaces the wheel markers above 5 rev/s.
 - **Green / red dots** — front and rear LEDs. See above.
 - **Green arrow** — commanded translation direction, shown while driving.
-- **`sat s`** — saturation scale, turns red below 1.0. See *Saturation* below.
+- **`portion`** — fraction of each revolution a motor is powered for. 1 is pure
+  spin, 0.5 is maximum translation. Trim it with `[` and `]`.
+- **`translate`** — whether the drive law is really translating. Red `NO` means
+  a guard is suppressing it: no spin command, or below 2000 RPM.
+- **`duty`** — effective duty per wheel, zero while a wheel is gated off.
+- **`gate`** — `ON` or `COAST` per wheel. This is the translation pulse.
+- **`wheel`** — left and right wheel speeds in RPM.
 - **`front` / `led`** — reference heading in degrees, and which LEDs fired this
   frame.
 
 Pausing switches the HUD to a numeric dump of the full state plus both wheel
-forces, which is the point of stepping mode.
+speeds, which is the point of stepping mode.
 
 ## Tunable parameters
 
@@ -101,25 +108,36 @@ forces, which is the point of stepping mode.
 | `R_body` | 0.15 | Disk radius, m. Also the drawn size. |
 | `I` | derived | Moment of inertia, `0.5*m*R_body**2` |
 | `r_w` | 0.12 | Wheel offset from the spin axis, m |
-| `b_v` | 2.4 | Translational viscous drag, N s/m |
-| `b_omega` | 8.42e-3 | Rotational viscous drag, N m s/rad |
+| `b_v` | 0.5 | Residual translational drag, N s/m |
+| `b_omega` | 3.4e-3 | Residual rotational drag, N m s/rad |
 | `f_wheel_max` | 14.7 | Peak tractive force per wheel, N |
-| `tau_max` | derived | `2*r_w*f_wheel_max` |
 
-`I` and `tau_max` derive from the others, so changing `m`, `R_body`, `r_w` or
-`f_wheel_max` propagates correctly.
+`I` derives from the others, so changing `m` or `R_body` propagates correctly.
 
-Two relations are worth knowing before you tune:
+Both drag terms are now **residual only** — aero, bearings and skid scrub. The
+motors are modelled explicitly, so back-EMF sets terminal spin, not `b_omega`.
+Raising `b_omega` lowers top RPM below the motor's own ceiling; it cannot raise
+it past that ceiling.
 
-```
-terminal spin       omega_ss = tau_max / b_omega          (419 rad/s = 4000 RPM)
-spin-up time const  I / b_omega                           (4.0 s)
-mean melty thrust   (2/pi) * f_wheel_max                  (9.36 N)
-terminal speed      mean thrust / b_v                     (3.90 m/s)
-```
+### Motors — `src/motor.py`
 
-So `b_omega` sets top RPM, and `b_v` sets top speed. Raising `f_wheel_max` raises
-both.
+Two PROPDRIVE v2 2836 1200KV outrunners, direct drive.
+
+| Symbol | Default | Meaning |
+| --- | --- | --- |
+| `V_bat` | 14.8 | Pack voltage, V (4S nominal) |
+| `KV` | 1200 | RPM per volt |
+| `R_motor` | 0.06 | Winding resistance, ohm (estimated) |
+| `i_max` | 48 | ESC current limit, A |
+| `r_wheel` | 0.030 | Wheel radius, m |
+| `J_w` | 3.0e-5 | Rotor plus wheel inertia, kg m^2 |
+| `eps_slip` | 0.3 | Friction regularisation, m/s |
+
+`KV * V_bat` sets the hard spin ceiling: 17,760 RPM at the shaft, which is
+4412 RPM at the body and leaves no room for a reduction. There is deliberately
+no gear-ratio constant — adding one would also need rotor inertia reflected as
+`G^2*J_rotor` and `b_w` rescaled. Shrinking `eps_slip` makes the contact
+stiffer and eats RK4 stability margin.
 
 ### Simulation and view
 
@@ -135,50 +153,128 @@ both.
 | `BLUR_THRESHOLD_REV_S` | `src/viz.py` | 5.0 | Spin rate at which wheels become a blur ring |
 | `LED_ARC` | `src/viz.py` | 14 deg | Half-width of the arc over which an LED fires |
 | `TRAIL_MAX` | `src/viz.py` | 600 | Trail length |
+| `PHASE_LEAD` | `src/control.py` | 83.5 deg | Drive phase advance against the spin |
+| `MIN_TRANSLATION_OMEGA` | `src/control.py` | 2000 RPM | Below this, spin up only; no translation |
+| `DRIVE_PORTION` | `src/main.py` | 0.5 | Starting motor-on portion while driving |
 
 `DT = 1e-4` gives 150 steps per revolution at 4000 RPM. Going much coarser will
 under-resolve the drive square wave, which switches twice per revolution.
 
 ## How it works
 
-State is `x = [X, Y, theta, vx, vy, omega]` in a standard Cartesian arena frame:
-`+X` right, `+Y` up, `theta` counterclockwise from `+X` and left unwrapped.
+State is `x = [X, Y, theta, vx, vy, omega, w_L, w_R]` in a standard Cartesian
+arena frame: `+X` right, `+Y` up, `theta` counterclockwise from `+X` and left
+unwrapped. The trailing pair are wheel speeds, carried because contact force
+depends on slip against the body motion.
 
-Translation comes from phase-modulating thrust against the heading:
+Translation comes from gating one motor off over part of each rotation. Neither
+motor is ever reversed, the gated-off one coasts rather than braking, and duty
+is always full:
 
 ```
-psi_d = psi_ref            driving forward
-psi_d = psi_ref + pi       driving backward
-f_b   = throttle * f_wheel_max * sign(cos(theta - psi_d))
+psi_d    = psi_ref            driving forward
+psi_d    = psi_ref + pi       driving backward
+phi      = ssa(theta - psi_d + PHASE_LEAD)
+half_arc = pi * portion
+gate_pos = |phi| <= half_arc              # wheel thrusting along +body x
+gate_neg = |ssa(phi - pi)| <= half_arc
+u_L, u_R = -sign(spin), +sign(spin)
 ```
 
-Both wheels push forward through the half revolution whose body x-axis points
-within 90 degrees of `psi_d`, and reverse through the other half, so the bot
-drifts along `psi_d`. This is evaluated **inside** the integrator at every RK4
-stage, since `theta` advances about a full revolution per rendered frame.
+`portion` is the fraction of each revolution a motor is powered for: 1 keeps
+both on the whole turn (max spin, zero translation), 0.5 gives two
+complementary half-turn arcs (max translation). This follows
+[OpenMelt 2](https://github.com/nothinglabs/openmelt2). It is evaluated
+**inside** the integrator at every RK4 stage, since `theta` advances about a
+full revolution per rendered frame.
+
+Only the *sign* of `spin` is used. A motor at part duty while its wheel is at
+spin speed sits below its own back-EMF and regen brakes rather than driving —
+break-even is 90% duty at the operating point — so spin rate is controlled by
+arc width, never by amplitude. Open Melt's `BINARY_THROTTLE` works the same
+way.
 
 `psi_ref` is the steerable front; `theta` is the physical chassis angle. They
 are unrelated except that the LEDs fire when `theta` passes `psi_ref`.
 
+### Phase lead
 
-### Saturation
+`PHASE_LEAD` in `src/control.py` is 83.5 degrees, applied against the spin so
+the bot *travels* along the commanded heading. Without it the course sits 83
+degrees off and the bot is not drivable.
 
-Spin and translation share one force budget. When a command exceeds it, the
-wheel vector is scaled toward the origin rather than clipped per wheel:
+Only about 20 degrees of that is thrust lag. The rest corrects the slip
+coupling, which rotates the settled course away from the thrust direction, so
+the constant is calibrated against where the bot ends up rather than against
+where it pushes. To recalibrate after changing the plant: set `PHASE_LEAD` to
+0, drive at a steady `portion` until speed converges, measure the course error,
+and put it back.
+
+The lead follows the sign of actual `omega`, not the commanded spin, because
+it is the body sweeping past the powered arc that creates the lag.
+
+### Translation needs spin
+
+Two guards make the drive predictable, both mirroring real melty firmware:
+
+- **Below 2000 RPM** (`MIN_TRANSLATION_OMEGA`) translation is not attempted and
+  both motors stay powered. Lag grows with spin rate, so the single lead
+  constant only holds near the operating point.
+- **At zero spin command** both motors coast. Releasing `Space` while holding a
+  direction gives a clean spin-down with no translation, not a reverse. A motor
+  gated on at zero duty would short its back-EMF into a 48 A brake and push the
+  bot backwards.
+
+So you need spin before `Up` does anything useful — hold `Space`. The HUD
+`translate` line tells you which state you are in.
+
+### Motors
+
+Duty is not force. Each wheel runs a motor model and the contact force comes
+out of slip, never from the command:
 
 ```
-s = min(1, f_wheel_max / max(|F_L|, |F_R|))
+i     = gate * clip((u*V_bat - k_e*w_wheel)/R_motor, -i_max, i_max)
+F     = f_wheel_max * tanh((r_wheel*w_wheel - v_contact)/eps_slip)
+w_dot = (k_t*i - r_wheel*F - b_w*w_wheel)/J_w
 ```
 
-Because thrust and torque are both linear in the wheel forces, `s` scales both
-equally and the spin-to-translation ratio survives. At full spin plus full
-translation `s = 2/3`, so terminal spin sags from 4000 to about 2667 RPM while
-you drive. Translation costs RPM, exactly as on real hardware.
+`v_contact` is the ground speed of the contact patch, `vx_body -+ omega*r_w`.
+The body state feeds back into the wheels, so this is a loop rather than a
+feedforward chain. `gate = 0` is a true coast — no current — which is a
+different thing from `u = 0`, which would short the back-EMF into a regen
+brake.
+
+Three consequences you will feel while driving:
+
+- **Wheels cannot reverse mid-spin.** Flipping a wheel from +1681 to −1681
+  rad/s takes about 2 s even at full braking current — some 267 drive
+  half-periods. Commanding it simply does not happen.
+- **Translation is slow.** The best case is 0.57 m/s. The gated-off wheel
+  keeps producing spin-sustaining force as it coasts down, cancelling much of
+  the powered wheel's thrust.
+- **Translation costs RPM,** though far less than braking would: 4003 RPM down
+  to 3649 at `portion` 0.5.
+
+| Portion | Terminal spin | Speed | Course error |
+| --- | --- | --- | --- |
+| 1.00 | 4003 RPM | 0 | — |
+| 0.90 | 3960 RPM | 0.10 m/s | −1.0 deg |
+| 0.75 | 3876 RPM | 0.27 m/s | −0.4 deg |
+| 0.50 | 3649 RPM | 0.57 m/s | +1.7 deg |
+| 0.35 | 2877 RPM | 0.71 m/s | +3.6 deg |
+| 0.20 | 2000 RPM | 0.67 m/s | +3.1 deg |
+
+The last row sits on the 2000 RPM floor rather than its own terminal spin: ask
+for more translation than the spin can sustain and the guard hands back full
+power. The speed column is the least trustworthy part of the model — it is set
+by the slip coupling, not by `b_v`.
 
 ## Layout
 
 ```
-src/state_space.py   plant parameters and state_dot        (jitted, cached)
+src/state_space.py   body plant and state_dot              (jitted, cached)
+src/motor.py         per-wheel motor, slip, contact force  (jitted, uncached)
 src/control.py       melty drive law and closed-loop RHS   (jitted, uncached)
 src/rksolver.py      RK4 step and fixed-step integrator    (jitted, uncached)
 src/geomutils.py     angle and frame helpers               (plain Python)
@@ -186,14 +282,14 @@ src/bot.py           state wrapper with named properties
 src/viz.py           pygame rendering
 src/main.py          loop, input, mode handling
 ```
-
-`bot` knows the plant, `control` knows the drive law, `main` is the only glue.
+`state_space` owns the body, `motor` owns one wheel, `control` owns the drive
+law and glues them in compiled space, `main` is the only glue in Python space.
 Everything except `viz` and `main` runs headless, so the physics is testable
 without a display.
 
 ### A note on numba
 
-`control.py` and `rksolver.py` are **deliberately not cached**. Numba keys its
+`motor.py`, `control.py` and `rksolver.py` are **deliberately not cached**. Numba keys its
 cache on the defining file, and these freeze constants imported from
 `state_space.py` — a cached build would survive edits there and silently run
 with stale parameters. Uncached, they recompile each start and always reflect
