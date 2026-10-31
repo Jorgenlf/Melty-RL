@@ -23,6 +23,17 @@ uv run python -m src.main
 
 First launch pauses for a second or so while numba compiles the integrator.
 
+## Tests
+
+```powershell
+uv run pytest -q
+```
+
+`tests/test_physics.py` is headless and needs no display. It pins the 4002 RPM
+operating point, the `PHASE_LEAD` calibration that makes translation track the
+commanded heading, the coast-versus-brake behaviour at zero spin, the motor
+current clamp, and timestep convergence. It runs in about 5 seconds.
+
 ## Controls
 
 | Key | Action |
@@ -133,11 +144,12 @@ Two PROPDRIVE v2 2836 1200KV outrunners, direct drive.
 | `J_w` | 3.0e-5 | Rotor plus wheel inertia, kg m^2 |
 | `eps_slip` | 0.3 | Friction regularisation, m/s |
 
-`KV * V_bat` sets the hard spin ceiling: 17,760 RPM at the shaft, which is
-4412 RPM at the body and leaves no room for a reduction. There is deliberately
-no gear-ratio constant — adding one would also need rotor inertia reflected as
-`G^2*J_rotor` and `b_w` rescaled. Shrinking `eps_slip` makes the contact
-stiffer and eats RK4 stability margin.
+`KV * V_bat` sets the hard spin ceiling: 17,760 RPM at the shaft. `b_w` loads
+the shaft even with no traction load, dropping free speed to 17,653 RPM, which
+is **4413 RPM at the body** and leaves no room for a reduction. There is
+deliberately no gear-ratio constant — adding one would also need rotor inertia
+reflected as `G^2*J_rotor` and `b_w` rescaled. Shrinking `eps_slip` makes the
+contact stiffer and eats RK4 stability margin.
 
 ### Simulation and view
 
@@ -260,10 +272,13 @@ Three consequences you will feel while driving:
 | --- | --- | --- | --- |
 | 1.00 | 4003 RPM | 0 | — |
 | 0.90 | 3960 RPM | 0.10 m/s | −1.0 deg |
-| 0.75 | 3876 RPM | 0.27 m/s | −0.4 deg |
+| 0.75 | 3877 RPM | 0.27 m/s | −0.3 deg |
 | 0.50 | 3649 RPM | 0.57 m/s | +1.7 deg |
-| 0.35 | 2877 RPM | 0.71 m/s | +3.6 deg |
-| 0.20 | 2000 RPM | 0.67 m/s | +3.1 deg |
+| 0.35 | 2830 RPM | 0.72 m/s | +3.5 deg |
+| 0.20 | 2000 RPM | 0.67 m/s | +2.9 deg |
+
+Measured after a 90 s settle. The 0.35 row needs most of that — it still reads
+2784 RPM at 30 s — so short runs overstate it.
 
 The last row sits on the 2000 RPM floor rather than its own terminal spin: ask
 for more translation than the spin can sustain and the guard hands back full

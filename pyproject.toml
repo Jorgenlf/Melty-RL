@@ -9,3 +9,14 @@ dependencies = [
     "numpy>=2.5.4",
     "pygame-ce>=2.5.8",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+# src/ is imported as a package from the repo root, the same way `python -m
+# src.main` resolves it.
+pythonpath = ["."]
+testpaths = ["tests"]

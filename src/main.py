@@ -57,7 +57,10 @@ def main():
     running = True
 
     while running:
-        frame_dt = clock.tick(RENDER_HZ)/1000.0
+        # Clamped to the physics the frame can actually run: a stalled frame
+        # advances MAX_SUBSTEPS of sim time, so steering must not precess by
+        # the full wall-clock gap or the front jumps on recovery.
+        frame_dt = min(clock.tick(RENDER_HZ)/1000.0, MAX_SUBSTEPS*DT)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -80,7 +83,7 @@ def main():
                     portion = DRIVE_PORTION
                     accumulator = 0.0
                     pending = 0
-                    view.clear_trail()
+                    view.reset()
 
         keys = pygame.key.get_pressed()
         cmd, psi_ref, portion = read_command(keys, psi_ref, portion, frame_dt)
@@ -102,9 +105,9 @@ def main():
             traj = bot.run(control.closed_loop, cmd, substeps)
             view.push_trail(traj)
             view.update_leds(traj[:, 2], psi_ref)
+            view.update_gates(control.gate_fractions(traj[:, 2], traj[:, 5], cmd))
 
-        wheels = control.wheel_duties(bot.theta, bot.omega, cmd)
-        view.draw(bot, cmd, psi_ref, wheels, paused, substeps,
+        view.draw(bot, cmd, psi_ref, portion, paused, substeps,
                   control.translating(bot.omega, cmd))
 
     pygame.quit()

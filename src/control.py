@@ -95,6 +95,26 @@ def translating(omega, cmd):
     return (cmd[2] != 0.0
             and abs(omega) >= MIN_TRANSLATION_OMEGA
             and cmd[1] < 1.0)
+
+
+@nb.njit
+def gate_fractions(thetas, omegas, cmd):
+    """Mean powered fraction of each motor across a frame's substeps.
+
+    Sampling the gate once per frame is meaningless at roughly a revolution
+    per frame: the answer is whatever phase the frame happened to end on.
+    """
+    n = thetas.shape[0]
+    acc_l = 0.0
+    acc_r = 0.0
+    for i in range(n):
+        u = wheel_duties(thetas[i], omegas[i], cmd)
+        acc_l += u[2]
+        acc_r += u[3]
+
+    out = np.empty(2)
+    out[0] = acc_l/n
+    out[1] = acc_r/n
     return out
 
 

@@ -2,10 +2,10 @@
 
 - **Status:** Implemented. Keep in step with the code.
 
-This records *why* the simulator is built the way it is: where the plant
-parameters come from, why saturation scales rather than clips, why the timestep
-is what it is, and which approaches were rejected. See the README for how to run
-and drive it.
+This records *why* the simulator is built the way it is: where the plant and
+motor parameters come from, why thrust is gated by rotational phase, why the
+timestep is what it is, and which approaches were rejected. See the README for
+how to run and drive it.
 
 ## Goal
 
@@ -157,7 +157,13 @@ This acts as a floor on spin: ask for a `portion` whose natural terminal spin
 would fall below 2000 RPM and the guard hands back full power until it climbs
 above again, settling exactly on the threshold. That is the intended
 behaviour, not a defect — it stops a greedy translation command from stalling
-the spin — and both branches drive, so it does not chatter.
+the spin.
+
+Sitting on the floor the guard does toggle, measured at 346 transitions per
+second at `portion` 0.20. It is harmless because both branches drive: the
+resulting ripple is 1.2 RPM peak to peak, 0.06% of 2000. Blending `portion`
+smoothly toward 1 near the floor would remove the toggling, at the cost of a
+second calibration region in a drive law whose lead is already empirical.
 
 This is the one mode switch in the drive law. Scaling the lead with RPM instead
 would need a second calibration curve for the slip-coupling term, which is not
@@ -197,7 +203,13 @@ Holding 4000 RPM needs a contact patch speed of `omega * r_w = 50.3` m/s, so a
 of reach**, so the drivetrain is direct and the model has no gear ratio at all:
 adding one would also mean reflecting rotor inertia as `G^2*J_rotor` and
 rescaling `b_w`, so a bare `G` constant would be a trap. Measured terminal spin
-is 4002 RPM against a 4412 RPM no-load ceiling.
+is 4002 RPM against a 4413 RPM no-load ceiling.
+
+That ceiling is **not** `KV * V_bat` scaled by the wheel ratio, which would give
+4440 RPM. `b_w` loads the shaft even unloaded, so free speed is
+`k_t*V/R / (b_w + k_t^2/R) = 1848.6` rad/s, not 1860, and the body ceiling
+follows at `1848.6 * r_wheel/r_w = 462.2` rad/s. Pinned by
+`test_terminal_spin_is_below_the_no_load_ceiling`.
 
 ### Current limit binds before traction
 
@@ -264,10 +276,13 @@ These are measured from the simulator, not assumed:
 | --- | --- | --- | --- |
 | 1.00 | 4003 RPM | 0 | — |
 | 0.90 | 3960 RPM | 0.10 m/s | −1.0 deg |
-| 0.75 | 3876 RPM | 0.27 m/s | −0.4 deg |
+| 0.75 | 3877 RPM | 0.27 m/s | −0.3 deg |
 | 0.50 | 3649 RPM | 0.57 m/s | +1.7 deg |
-| 0.35 | 2877 RPM | 0.71 m/s | +3.6 deg |
-| 0.20 | 2000 RPM | 0.67 m/s | +3.1 deg |
+| 0.35 | 2830 RPM | 0.72 m/s | +3.5 deg |
+| 0.20 | 2000 RPM | 0.67 m/s | +2.9 deg |
+
+Measured after a 90 s settle. The 0.35 row needs most of that: it is still at
+2784 RPM at 30 s and only reaches 2830 by 60 s, so a short run reads high.
 
 The 0.20 row sits on the `MIN_TRANSLATION_OMEGA` floor rather than at its own
 natural terminal spin.
@@ -402,7 +417,8 @@ marker is pure aliasing.
   a `LED_ARC` half-width arc as the chassis sweeps past `psi_ref`, so every
   flash necessarily lands at the reference: green forward, red aft. Unlit, they
   render as dim outlines at the true chassis angle.
-- **Trail:** deque of past positions, faded.
+- **Trail:** list of past positions, faded. Subsampled one point in 16, with
+  the frame's last row forced in so the head stays on the bot.
 - **Command arrow:** `psi_d` drawn from the bot center, but only while the
   drive law will really translate, so it cannot promise motion that the zero
   spin or low-RPM guards are suppressing.
@@ -423,24 +439,36 @@ Toggled with `C`:
 ### HUD
 
 Running: RPM, rev/s, speed, `psi_d`, `portion`, spin sign, whether translation
-is actually active, effective duty and gate state per wheel, wheel RPM, and
+is actually active, mean gate fraction per wheel over the frame, wheel RPM, and
 substeps/frame.
+
+`portion` is shown as the stored trim value, which `[` and `]` move even when
+not driving; the active value is annotated only when the drive law overrides it.
+Gate is a frame mean rather than an instantaneous sample, because at roughly a
+revolution per frame a single sample reports whatever phase the frame ended on.
 
 Paused: numeric dump of `X`, `Y`, `theta`, `vx`, `vy`, `omega` and both wheel
 speeds. This is the primary debugging payload of stepping mode.
 
 ## Testing
 
-All tests headless, with no pygame dependency:
+`tests/test_physics.py`, headless with no pygame dependency. Run with
+`uv run pytest -q`.
 
-1. **Coast decay** matches `v(t) = v0 * exp(-b_v*t/m)`.
-2. **Spin-up** matches the first-order analytic solution for constant `tau`.
-3. **Melty translation** drift direction matches `psi_d` within tolerance over
-   several revolutions, across a sweep of spin rates in 2000–4000 RPM.
-4. **Saturation** at full spin plus full translation yields `s = 2/3` and
-   non-zero `f_b`, guarding the regression that independent clipping caused.
-5. **Timestep convergence:** trajectories at `dt = 1e-4` and `5e-5` agree within
-   tolerance.
+| Test | Guards |
+| --- | --- |
+| `terminal_spin_matches_documented_figure` | The 4002 RPM operating point |
+| `terminal_spin_is_below_the_no_load_ceiling` | Back-EMF caps spin, and the ceiling includes `b_w` |
+| `translation_tracks_the_commanded_heading` | `PHASE_LEAD`, the one empirical constant |
+| `translation_follows_a_rotated_command` | The lead is not accidentally tuned to `psi_d = 0` |
+| `zero_spin_coasts_rather_than_braking` | The regen-brake trap that drove the bot backwards |
+| `slow_spin_forces_both_motors_on` | `MIN_TRANSLATION_OMEGA` guard |
+| `portion_one_produces_no_translation` | Full power means pure spin |
+| `lower_portion_trades_spin_for_speed` | The core tradeoff holds |
+| `motor_current_is_clamped_at_the_esc_limit` | Current binds before traction |
+| `coasting_wheel_carries_no_current` | Gate 0 is a coast, not a duty-0 brake |
+| `gate_fractions_average_to_the_commanded_portion` | The HUD reading means what it says |
+| `timestep_is_converged` | `dt = 1e-4` does not alias the drive square wave |
 
 ## Out of scope
 
@@ -450,5 +478,6 @@ Deferred to later work:
 - Closed-loop RPM governor. Spin is open-loop here.
 - Heading estimation. The simulator knows `theta` exactly; a real melty must
   estimate rotational phase from accelerometers and will drift.
-- Motor dynamics, traction limits, wheel slip.
+- Battery sag, thermal derating, ESC commutation.
+- Lateral tyre forces. Slip is modelled along the body x-axis only.
 - Gamepad input.

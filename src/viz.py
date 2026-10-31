@@ -44,11 +44,15 @@ class View:
     def __init__(self, width=1180, height=760):
         self.surface = pygame.display.set_mode((width, height))
         pygame.display.set_caption("Melty-RL")
-        self.font = pygame.font.SysFont("consolas", 16)
-        self.font_small = pygame.font.SysFont("consolas", 14)
+        # Comma list so the HUD keeps its columns off Windows; SysFont takes
+        # the first match and would otherwise fall back to a proportional face.
+        mono = "consolas,dejavusansmono,liberationmono,couriernew,monospace"
+        self.font = pygame.font.SysFont(mono, 16)
+        self.font_small = pygame.font.SysFont(mono, 14)
         self.follow = True
         self.trail = []
         self.flash_angle = None
+        self.gates = np.zeros(2)
 
     @property
     def center(self):
@@ -65,24 +69,36 @@ class View:
 
     def push_trail(self, traj):
         # Subsample: a frame holds ~167 substeps but only needs a few points.
-        self.trail.extend(traj[::16, 0:2])
+        # The last row is forced in so the trail head sits on the bot.
+        idx = np.arange(0, len(traj), 16)
+        if idx[-1] != len(traj) - 1:
+            idx = np.append(idx, len(traj) - 1)
+        self.trail.extend(traj[idx, 0:2])
         if len(self.trail) > TRAIL_MAX:
             del self.trail[:len(self.trail) - TRAIL_MAX]
 
     def clear_trail(self):
         self.trail.clear()
 
+    def reset(self):
+        self.trail.clear()
+        self.flash_angle = None
+        self.gates = np.zeros(2)
+
     def update_leds(self, thetas, psi_ref):
         """Records where on the rim the LEDs fired this frame, if at all."""
         self.flash_angle = _flash_angle(thetas, psi_ref)
 
-    def draw(self, bot, cmd, psi_ref, duties, paused, substeps, translating):
+    def update_gates(self, gates):
+        self.gates = gates
+
+    def draw(self, bot, cmd, psi_ref, portion, paused, substeps, translating):
         camera = self._camera(bot)
         self.surface.fill(BACKGROUND)
         self._draw_grid(camera)
         self._draw_trail(camera)
         self._draw_bot(bot, cmd, camera, translating)
-        self._draw_hud(bot, cmd, psi_ref, duties, paused, substeps, translating)
+        self._draw_hud(bot, cmd, psi_ref, portion, paused, substeps, translating)
         pygame.display.flip()
 
     def _draw_grid(self, camera):
@@ -170,21 +186,21 @@ class View:
             tip - 7.0*perp,
         ])
 
-    def _draw_hud(self, bot, cmd, psi_ref, duties, paused, substeps, translating):
+    def _draw_hud(self, bot, cmd, psi_ref, portion, paused, substeps, translating):
         rpm = bot.spin_rate*60.0
         leds = "FIRE" if self.flash_angle is not None else "----"
         w_l, w_r = bot.wheel_speeds
-        gate_l = "ON  " if duties[2] > 0.0 else "COAST"
-        gate_r = "ON  " if duties[3] > 0.0 else "COAST"
+        # Shown as the trim value, which [ and ] move even while idle; the
+        # drive law overrides it to 1 whenever translation is not commanded.
+        held = "" if cmd[1] == portion else f"  (active {cmd[1]:.2f})"
         lines = [
             f"{rpm:8.0f} RPM   {bot.spin_rate:6.2f} rev/s",
             f"{bot.speed:8.2f} m/s   heading {np.degrees(bot.heading):7.1f} deg",
             f"front    {np.degrees(geom.ssa(psi_ref)):7.1f} deg   led {leds}",
             f"psi_d    {np.degrees(cmd[0]):7.1f} deg",
-            f"portion  {cmd[1]:7.2f}   spin {cmd[2]:+.0f}",
+            f"portion  {portion:7.2f}   spin {cmd[2]:+.0f}{held}",
             f"translate {'YES' if translating else ' NO':>6}",
-            f"duty     {duties[0]*duties[2]:7.2f} {duties[1]*duties[3]:7.2f}",
-            f"gate     {gate_l} {gate_r}",
+            f"gate     {self.gates[0]*100:5.1f}% {self.gates[1]*100:5.1f}%  mean/frame",
             f"wheel {w_l*30.0/np.pi:8.0f} {w_r*30.0/np.pi:8.0f} RPM",
             f"substeps {substeps:7d}",
         ]
